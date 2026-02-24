@@ -2,13 +2,16 @@ import {
   BadRequestException,
   ForbiddenException,
   Injectable,
+  NotFoundException,
+  UnauthorizedException,
 } from "@nestjs/common";
 import {JwtService} from "@nestjs/jwt";
 import {InjectRepository} from "@nestjs/typeorm";
-import {randomInt} from "crypto";
+import {randomInt, randomUUID} from "crypto";
 import {Repository} from "typeorm";
 import UserOtp from "../user/entity/otp.entity";
 import User from "../user/entity/user.entity";
+import CheckOtpDto from "./dto/check-otp.dtp";
 import SendOtpDto from "./dto/send-otp";
 
 @Injectable()
@@ -62,5 +65,85 @@ export default class AuthService {
     return {
       otpToken,
     };
+  }
+  async checkOtp(checkOtpDto: CheckOtpDto) {
+    const {code, token} = checkOtpDto;
+    const accountId = this.verifyOtpToken(token, true);
+    const user = await this.userRepo.findOneBy({id: accountId});
+    if (!user) throw new NotFoundException();
+    const otp = await this.otpRepo.findOneBy({
+      userId: user.id,
+    });
+    if (!otp) throw new NotFoundException("not found otp");
+    const now = new Date();
+    if (otp.expiresIn < now) {
+      throw new UnauthorizedException("otp expired");
+    }
+    if (otp.code !== code) {
+      throw new UnauthorizedException("otp code wrong");
+    }
+    await this.userRepo.save(user);
+    await this.otpRepo.save(otp);
+    const {accessToken, refreshToken, tokenId} = this.clientTokenGenerator(
+      user.id,
+    );
+    return {
+      message: "login successfully",
+      data: {
+        accessToken,
+        refreshToken,
+      },
+    };
+  }
+  verifyOtpToken(token: string, client: boolean = false) {
+    try {
+      let secret = "otp-token-secret";
+      const decoded = this.jwtService.verify(token, {
+        secret,
+      });
+      if (decoded?.accountId) return decoded.accountId;
+      throw new BadRequestException("invalid token");
+    } catch (error) {
+      throw new BadRequestException("otp expired!");
+    }
+  }
+  clientTokenGenerator(accountId: number) {
+    const accessToken = this.jwtService.sign(
+      {accountId},
+      {secret: "access-secret", expiresIn: "5m"},
+    );
+    const tokenId = randomUUID();
+    const refreshToken = this.jwtService.sign(
+      {accountId, id: tokenId},
+      {secret: "refresh-token", expiresIn: "30d"},
+    );
+    return {
+      accessToken,
+      refreshToken,
+      tokenId,
+    };
+  }
+  async verifyAccessToken(token: string) {
+    try {
+      const decoded = this.jwtService.verify(token, {
+        secret: "access-secret",
+      });
+      if (decoded?.accountId) {
+        const user = await this.userRepo.findOne({
+          where: {id: decoded.accountId},
+        });
+        return {
+          id: user.id,
+          image: user?.image,
+          firstname: user?.firstname,
+          lastname: user?.lastname,
+          mobile: user.mobile,
+          status: user?.status,
+        };
+      }
+      throw new UnauthorizedException("invalid token");
+    } catch (error) {
+      throw new UnauthorizedException("login again");
+    }
   }
 }
